@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Planner de Jornadas</title>
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- Mini CSS extra: pestañas + ocultar paneles sin romper nada -->
+  <style>
+    .tabsRow{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin: 0 0 18px;
+      align-items:center;
+    }
+    .tabsLeft{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .tabBtn{
+      border: 1px solid var(--border);
+      background:#fff;
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-weight: 950;
+      cursor:pointer;
+      transition: transform .08s ease, background .15s ease, border-color .15s ease;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+    }
+    .tabBtn:hover{
+      background:#f8fafc;
+      border-color: rgba(148,163,184,.55);
+    }
+    .tabBtn:active{ transform: translateY(1px); }
+
+    .tabBtn.isActive{
+      background: #eef2ff;
+      border-color: rgba(108,124,255,.28);
+      color: #3730a3;
+      box-shadow: 0 10px 24px rgba(108,124,255,.08);
+    }
+
+    .panel{ display:block; }
+    .panel.isHidden{ display:none; }
+
+    /* Legend más honesta: ya no se ve como selector raro */
+    .legendNote{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+    .legendNote .chip{
+      cursor: default;
+    }
+    .legendHelp{
+      font-size: .82rem;
+      color: var(--muted);
+      line-height: 1.3;
+      max-width: 420px;
+      text-align:right;
+    }
+
+    @media (max-width: 720px){
+      .legendHelp{ text-align:left; max-width: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <!-- TOP -->
+    <header class="top">
+      <div class="brand">
+        <div class="logoDot"></div>
+        <div>
+          <div class="brandTitle">Planner</div>
+          <div class="brandSub">Horas efectivas (sin inflar con almuerzo) 🍽️</div>
+        </div>
+      </div>
+
+      <div class="monthNav">
+        <button id="prevMonth" class="btn" type="button">◀</button>
+        <div class="monthLabel" id="monthLabel">Mes</div>
+        <button id="nextMonth" class="btn" type="button">▶</button>
+      </div>
+    </header>
+
+    <!-- TABS -->
+    <div class="tabsRow" role="tablist" aria-label="Secciones del Planner">
+      <div class="tabsLeft">
+        <button class="tabBtn isActive" type="button" data-tab="main" role="tab" aria-selected="true">
+          📅 Calendario y semana
+        </button>
+        <button class="tabBtn" type="button" data-tab="totals" role="tab" aria-selected="false">
+          🧮 Totales
+        </button>
+        <button class="tabBtn" type="button" data-tab="kpiMonth" role="tab" aria-selected="false">
+          📈 KPIs mensuales
+        </button>
+        <button class="tabBtn" type="button" data-tab="kpiYear" role="tab" aria-selected="false">
+          🗓️ KPIs anuales
+        </button>
+        <button class="tabBtn" type="button" data-tab="details" role="tab" aria-selected="false">
+          🔍 Detalles
+        </button>
+      </div>
+
+      <!-- Nada se quita: solo se mueve la explicación a un lugar menos confuso -->
+      <div class="legendNote">
+        <div class="legendHelp">
+          Guía visual: <b>Azul</b> = con jornada. <b>Blanco</b> = sin jornada.
+          <br/>Gris claro = celdas fuera del mes (relleno del calendario).
+        </div>
+      </div>
+    </div>
+
+    <!-- PANEL: MAIN (Siempre primero) -->
+    <div class="panel" data-panel="main">
+      <!-- CALENDAR -->
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>Calendario</h2>
+            <div class="sub">Todas las horas mostradas son <b>efectivas</b> (si supera 6h, se descuenta 1h de almuerzo).</div>
+          </div>
+
+          <!-- Legend visual real (no selector) -->
+          <div class="legend" aria-label="Leyenda del calendario">
+            <span class="chip chip--on">Con jornada</span>
+            <span class="chip">Sin jornada</span>
+          </div>
+        </div>
+
+        <div class="calendar">
+          <div class="calendarHead">
+            <div class="calDay">Lun</div>
+            <div class="calDay">Mar</div>
+            <div class="calDay">Mié</div>
+            <div class="calDay">Jue</div>
+            <div class="calDay">Vie</div>
+            <div class="calDay">Sáb</div>
+            <div class="calDay">Dom</div>
+          </div>
+
+          <div id="calendarGrid" class="calendarGrid">
+            <!-- app.js llena esto -->
+          </div>
+        </div>
+      </section>
+
+      <!-- WEEK (BY WEEK INSIDE MONTH) -->
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>Carga por semana</h2>
+            <div class="sub" id="weekLabel">Semana · Del --/-- al --/--</div>
+          </div>
+
+          <div class="actions">
+            <button id="prevWeek" class="btn" type="button">◀ Semana</button>
+            <button id="nextWeek" class="btn" type="button">Semana ▶</button>
+          </div>
+        </div>
+
+        <div class="weekChart">
+          <div class="dayBar">
+            <div class="bar" id="bar-lun"></div>
+            <div class="dayName">Lun</div>
+            <div class="dayHours" id="hours-lun">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-mar"></div>
+            <div class="dayName">Mar</div>
+            <div class="dayHours" id="hours-mar">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-mie"></div>
+            <div class="dayName">Mié</div>
+            <div class="dayHours" id="hours-mie">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-jue"></div>
+            <div class="dayName">Jue</div>
+            <div class="dayHours" id="hours-jue">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-vie"></div>
+            <div class="dayName">Vie</div>
+            <div class="dayHours" id="hours-vie">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-sab"></div>
+            <div class="dayName">Sáb</div>
+            <div class="dayHours" id="hours-sab">0.0h</div>
+          </div>
+
+          <div class="dayBar">
+            <div class="bar" id="bar-dom"></div>
+            <div class="dayName">Dom</div>
+            <div class="dayHours" id="hours-dom">0.0h</div>
+          </div>
+        </div>
+
+        <div class="sub" style="margin-top:10px;">
+          Nota: aquí solo ves <b>horas efectivas</b>. El almuerzo se descuenta y no se suma en ningún total.
+        </div>
+      </section>
+    </div>
+
+    <!-- PANEL: TOTALS -->
+    <div class="panel isHidden" data-panel="totals">
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>Totales</h2>
+            <div class="sub">Todo lo de acá es <b>efectivo</b> (sin almuerzo).</div>
+          </div>
+        </div>
+
+        <div id="totalsGrid" class="totalsGrid">
+          <!-- app.js llena esto -->
+        </div>
+      </section>
+    </div>
+
+    <!-- PANEL: KPI MENSUALES -->
+    <div class="panel isHidden" data-panel="kpiMonth">
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>KPIs mensuales</h2>
+            <div class="sub">Indicadores con horas <b>efectivas</b>. El almuerzo se reporta aparte, no se suma.</div>
+          </div>
+        </div>
+
+        <div class="kpiGrid">
+          <div class="kpi">
+            <div class="kpiLabel">Día con mayor jornada efectiva (mes)</div>
+            <div class="kpiValue" id="kpiTopDay">--</div>
+            <div class="kpiHint" id="kpiTopDayHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Semana más cargada (mes)</div>
+            <div class="kpiValue" id="kpiTopWeek">--</div>
+            <div class="kpiHint" id="kpiTopWeekHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Total del mes (efectivo)</div>
+            <div class="kpiValue" id="kpiMonthTotal">--</div>
+            <div class="kpiHint" id="kpiMonthTotalHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Promedio semanal (efectivo)</div>
+            <div class="kpiValue" id="kpiWeekAvg">--</div>
+            <div class="kpiHint" id="kpiWeekAvgHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Día de semana más pesado (mes)</div>
+            <div class="kpiValue" id="kpiTopWeekday">--</div>
+            <div class="kpiHint" id="kpiTopWeekdayHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Días con jornada (mes)</div>
+            <div class="kpiValue" id="kpiDaysWithJornada">--</div>
+            <div class="kpiHint" id="kpiDaysWithJornadaHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Días donde aplica almuerzo</div>
+            <div class="kpiValue" id="kpiLunchDays">--</div>
+            <div class="kpiHint" id="kpiLunchDaysHint">Jornadas &gt; 6h (se descuenta 1h)</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Horas descontadas por almuerzo</div>
+            <div class="kpiValue" id="kpiLunchHours">--</div>
+            <div class="kpiHint" id="kpiLunchHoursHint">Total de horas descontadas este mes</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Total del mes (sin descuentos)</div>
+            <div class="kpiValue" id="kpiRawTotal">--</div>
+            <div class="kpiHint" id="kpiRawTotalHint">Solo informativo (no se usa para totales)</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- PANEL: KPI ANUALES (estructura lista; app.js se ajusta después para llenarlo) -->
+    <div class="panel isHidden" data-panel="kpiYear">
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>KPIs anuales</h2>
+            <div class="sub">Indicadores del año completo con horas <b>efectivas</b>. (Se calculan con los mismos datos).</div>
+          </div>
+        </div>
+
+        <div class="kpiGrid">
+          <div class="kpi">
+            <div class="kpiLabel">Total anual (efectivo)</div>
+            <div class="kpiValue" id="kpiYearTotal">--</div>
+            <div class="kpiHint" id="kpiYearTotalHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Promedio mensual (efectivo)</div>
+            <div class="kpiValue" id="kpiYearMonthAvg">--</div>
+            <div class="kpiHint" id="kpiYearMonthAvgHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Mes más cargado</div>
+            <div class="kpiValue" id="kpiTopMonth">--</div>
+            <div class="kpiHint" id="kpiTopMonthHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Semana más cargada (año)</div>
+            <div class="kpiValue" id="kpiTopWeekYear">--</div>
+            <div class="kpiHint" id="kpiTopWeekYearHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Día de semana más pesado (año)</div>
+            <div class="kpiValue" id="kpiTopWeekdayYear">--</div>
+            <div class="kpiHint" id="kpiTopWeekdayYearHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Horas descontadas por almuerzo (año)</div>
+            <div class="kpiValue" id="kpiLunchHoursYear">--</div>
+            <div class="kpiHint" id="kpiLunchHoursYearHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Días con jornada (año)</div>
+            <div class="kpiValue" id="kpiDaysWithJornadaYear">--</div>
+            <div class="kpiHint" id="kpiDaysWithJornadaYearHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Días sin jornada (año)</div>
+            <div class="kpiValue" id="kpiDaysWithoutJornadaYear">--</div>
+            <div class="kpiHint" id="kpiDaysWithoutJornadaYearHint">--</div>
+          </div>
+
+          <div class="kpi">
+            <div class="kpiLabel">Total anual (sin descuentos)</div>
+            <div class="kpiValue" id="kpiYearRawTotal">--</div>
+            <div class="kpiHint" id="kpiYearRawTotalHint">--</div>
+          </div>
+        </div>
+
+        <div class="sub" style="margin-top:12px;">
+          Nota: esta sección ya está lista para mostrarse. Solo falta que <code>app.js</code> pinte los valores anuales (lo hacemos en el siguiente paso).
+        </div>
+      </section>
+    </div>
+
+    <!-- PANEL: DETALLES (no se quita nada; solo se saca de la cara principal) -->
+    <div class="panel isHidden" data-panel="details">
+      <section class="card">
+        <div class="card__head">
+          <div>
+            <h2>Detalles</h2>
+            <div class="sub">Info de revisión rápida. Sigue siendo todo efectivo, solo más ordenado.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:6px;">
+          <div class="sub" style="margin-bottom:10px;">
+            Días donde aplicó almuerzo (para revisar rápido):
+          </div>
+          <div id="lunchDaysList" class="lunchDaysList">
+            <!-- app.js llena esto -->
+          </div>
+        </div>
+      </section>
+
+      <!-- (Opcional) Si luego quieres mover aquí otros bloques informativos, los colgamos en este panel sin romper el resto -->
+    </div>
+
+    <footer class="foot">
+      <div class="sub">Hecho para que los números no te mientan. Cosa rara en el mundo.</div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+
+  <!-- Mini JS: pestañas sin tocar tu app.js -->
+  <script>
+    (function(){
+      const tabBtns = Array.from(document.querySelectorAll("[data-tab]"));
+      const panels = Array.from(document.querySelectorAll("[data-panel]"));
+
+      function setActive(tabKey){
+        // botones
+        tabBtns.forEach(b=>{
+          const isOn = b.getAttribute("data-tab") === tabKey;
+          b.classList.toggle("isActive", isOn);
+          b.setAttribute("aria-selected", isOn ? "true" : "false");
+        });
+
+        // paneles
+        panels.forEach(p=>{
+          const isOn = p.getAttribute("data-panel") === tabKey;
+          p.classList.toggle("isHidden", !isOn);
+        });
+
+        try{ localStorage.setItem("planner_active_tab", tabKey); }catch(e){}
+      }
+
+      tabBtns.forEach(btn=>{
+        btn.addEventListener("click", ()=> setActive(btn.getAttribute("data-tab")));
+      });
+
+      // default: main (o el último guardado)
+      let saved = "main";
+      try{
+        const v = localStorage.getItem("planner_active_tab");
+        if(v) saved = v;
+      }catch(e){}
+
+      // si guardaron algo raro, caemos a main
+      const exists = tabBtns.some(b=>b.getAttribute("data-tab") === saved);
+      setActive(exists ? saved : "main");
+    })();
+  </script>
+</body>
+</html>
