@@ -2,7 +2,7 @@
  * CONFIG
  **********************************************************/
 const TSV_URL =
-  "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLTq9ULbDXOOu4zULhyAVkUuq12Te36kwu-bPGgC4ZgvfwvLRk5jipXc7qLfwp_QrPYotp4gijN5MK/pub?gid=0&single=true&output=tsv";
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR1CFXBvdEojaE0WJOyIZyJgjFhbidzASj4qzfFkNpFe76lJxFVRUEh5JbSDWKN4TWK_9zC97WD6SjV/pub?gid=0&single=true&output=tsv";
 
 const YEAR = 2026;
 
@@ -708,3 +708,4 @@ load().catch(err=>{
   console.error(err);
   alert("Error cargando datos. Revisa la URL TSV o permisos del Sheet.");
 });
+
