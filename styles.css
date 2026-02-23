@@ -1,3 +1,9 @@
+/* =========================================================
+   Planner de Jornadas — styles.css (PRO Mobile)
+   - Mobile UX mejorada (tabs sticky, legibilidad, tap targets)
+   - Mantiene estética clara y estructura actual
+========================================================= */
+
 /* =========================
    VARIABLES
 ========================= */
@@ -17,10 +23,15 @@
   --radius-md: 14px;
 
   --shadow: 0 10px 30px rgba(2,6,23,.06);
+
+  /* Extras pro */
+  --shadow-soft: 0 8px 24px rgba(2,6,23,.06);
+  --shadow-sticky: 0 8px 18px rgba(2,6,23,.08);
+  --ring: 0 0 0 4px rgba(108,124,255,.20);
 }
 
 /* =========================
-   RESET
+   RESET / BASE
 ========================= */
 *{ box-sizing: border-box; }
 
@@ -31,6 +42,22 @@ html, body{
   color: var(--text);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     Roboto, Ubuntu, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+}
+
+button, input, select, textarea{
+  font: inherit;
+}
+
+:focus-visible{
+  outline: none;
+  box-shadow: var(--ring);
+  border-color: rgba(108,124,255,.45) !important;
+}
+
+::selection{
+  background: rgba(108,124,255,.22);
 }
 
 /* =========================
@@ -57,6 +84,7 @@ html, body{
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .logoDot{
@@ -65,18 +93,21 @@ html, body{
   border-radius: 50%;
   background: linear-gradient(135deg, var(--primary), var(--primary2));
   box-shadow: 0 6px 18px rgba(108,124,255,.35);
+  flex: 0 0 auto;
 }
 
 .brandTitle{
   font-weight: 950;
   font-size: 1.15rem;
   letter-spacing: .2px;
+  line-height: 1.05;
 }
 
 .brandSub{
   font-size: .88rem;
   color: var(--muted);
-  margin-top: 2px;
+  margin-top: 3px;
+  line-height: 1.2;
 }
 
 .monthNav{
@@ -99,15 +130,17 @@ html, body{
   border: 1px solid var(--border);
   background: #fff;
   border-radius: 999px;
-  padding: 7px 14px;
+  padding: 8px 14px;
   font-weight: 850;
   cursor: pointer;
-  transition: transform .08s ease, background .15s ease, border-color .15s ease;
+  transition: transform .08s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
+  user-select: none;
 }
 
 .btn:hover{
   background: #f8fafc;
   border-color: rgba(148,163,184,.55);
+  box-shadow: 0 8px 18px rgba(2,6,23,.04);
 }
 
 .btn:active{
@@ -121,7 +154,7 @@ html, body{
 }
 
 /* =========================
-   TABS / PANELS (NUEVO)
+   TABS / PANELS
 ========================= */
 .tabsRow{
   display: flex;
@@ -152,6 +185,7 @@ html, body{
   align-items: center;
   gap: 8px;
   user-select: none;
+  white-space: nowrap;
 }
 
 .tabBtn:hover{
@@ -219,6 +253,7 @@ html, body{
   margin: 0;
   font-size: 1.1rem;
   font-weight: 950;
+  line-height: 1.15;
 }
 
 .sub{
@@ -239,7 +274,7 @@ html, body{
 
 .chip{
   border-radius: 999px;
-  padding: 5px 11px;
+  padding: 6px 12px;
   font-size: .78rem;
   font-weight: 900;
   background: #f1f5f9;
@@ -281,17 +316,22 @@ html, body{
   gap: 8px;
 }
 
+/* Celda */
 .calCell{
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 10px 10px 9px;
-  min-height: 86px;
+  min-height: 92px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   font-size: .78rem;
   background: #fff;
-  transition: border-color .15s ease, background .15s ease;
+  transition: border-color .15s ease, background .15s ease, transform .10s ease;
+}
+
+.calCell:hover{
+  border-color: rgba(148,163,184,.55);
 }
 
 .calCell.off{
@@ -308,13 +348,19 @@ html, body{
 
 .calDate{
   font-weight: 950;
-  font-size: .9rem;
+  font-size: .92rem;
 }
 
 .calHours{
   font-weight: 900;
   color: #4338ca;
-  line-height: 1.25;
+  line-height: 1.22;
+
+  /* Evita sopa infinita en móvil */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   word-break: break-word;
 }
 
@@ -477,27 +523,158 @@ html, body{
   .legendHelp{ max-width: 520px; }
 }
 
+/* =========================
+   MOBILE PRO (<= 720px)
+   - Tabs sticky + mejor layout + legibilidad
+========================= */
 @media (max-width: 720px){
+  .wrap{
+    padding: 14px 12px 70px;
+  }
+
+  /* Header apilado tipo app */
   .top{
     flex-direction: column;
     align-items: stretch;
+    gap: 12px;
+    margin-bottom: 10px;
   }
-  .monthNav{ justify-content: space-between; }
 
-  .tabsRow{
-    align-items: flex-start;
+  .brand{
+    justify-content: flex-start;
   }
+
+  .monthNav{
+    justify-content: space-between;
+    width: 100%;
+    gap: 10px;
+  }
+
+  .monthLabel{
+    min-width: 0;
+    flex: 1;
+    font-size: 1.02rem;
+  }
+
+  /* Botones más cómodos en touch */
+  .btn{
+    padding: 10px 14px;
+  }
+
+  /* Tabs sticky: quedan pegadas arriba */
+  .tabsRow{
+    position: sticky;
+    top: 0;
+    z-index: 20;
+
+    background: rgba(241,245,249,.92);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+
+    padding: 10px 0 10px;
+    margin: 6px 0 14px;
+
+    box-shadow: var(--shadow-sticky);
+    border-bottom: 1px solid rgba(226,232,240,.9);
+  }
+
+  .tabsLeft{
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 6px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabsLeft::-webkit-scrollbar{ display:none; }
+
+  .tabBtn{
+    padding: 10px 14px;
+    font-size: .92rem;
+  }
+
   .legendHelp{
     text-align: left;
     max-width: none;
   }
 
-  .bar{ height: 100px; }
+  /* Cards más compactas */
+  .card{
+    padding: 14px 14px 16px;
+    margin-bottom: 16px;
+    box-shadow: var(--shadow-soft);
+  }
 
+  .card__head{
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  /* Calendario: más espacio y menos caos */
+  .calendarHead{ gap: 6px; }
+  .calendarGrid{ gap: 6px; }
+
+  .calDay{
+    font-size: .78rem;
+  }
+
+  .calCell{
+    min-height: 96px;          /* más alto para que quepa info */
+    padding: 9px 9px 8px;
+  }
+
+  .calDate{
+    font-size: .9rem;
+  }
+
+  .calHours{
+    font-size: .76rem;
+    line-height: 1.18;
+    -webkit-line-clamp: 4;     /* en móvil damos una línea extra */
+  }
+
+  /* Week chart: 4 columnas (2 filas) en móvil */
+  .weekChart{
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+
+  .bar{
+    height: 92px;
+  }
+
+  .dayName{
+    font-size: .88rem;
+  }
+
+  .dayHours{
+    font-size: .80rem;
+  }
+
+  /* Totales y KPIs ya estaban bien, pero compactamos */
   .totalsGrid{ grid-template-columns: 1fr; }
   .kpiGrid{ grid-template-columns: 1fr; }
 
-  .calCell{ min-height: 78px; padding: 9px; }
-  .calendarHead{ gap: 6px; }
-  .calendarGrid{ gap: 6px; }
+  .kpiValue{
+    font-size: 1.35rem;
+  }
+
+  .kpiLabel{
+    font-size: .72rem;
+  }
+
+  .foot{
+    margin-top: 18px;
+    padding-bottom: 10px;
+  }
+}
+
+/* =========================
+   EXTRA: pantallas súper pequeñas
+========================= */
+@media (max-width: 380px){
+  .tabBtn{ padding: 9px 12px; font-size: .9rem; }
+  .calCell{ min-height: 92px; }
+  .calHours{ -webkit-line-clamp: 3; }
 }
