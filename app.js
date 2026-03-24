@@ -1,33 +1,29 @@
 /**********************************************************
- * Planner de Jornadas — app.js (PRO)
- * - Más rápido (Map por fecha, menos loops, menos find())
- * - Parseo robusto (headers o fallback por índice)
- * - Cache TSV (offline friendly)
- * - Render móvil inteligente (grid normal + lista en pantallas muy pequeñas)
+ * PLANNER DE JORNADAS · APP.JS
+ * Versión mejorada
+ * - Mes actual al abrir
+ * - Semana actual real al abrir
+ * - Semana visible suma días aunque cruce mes
+ * - Refresco robusto del Sheet
+ * - Mejor estabilidad general
  **********************************************************/
 
 /**********************************************************
  * CONFIG
  **********************************************************/
-const CFG = {
-  TSV_URL:
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLTq9ULbDXOOu4zULhyAVkUuq12Te36kwu-bPGgC4ZgvfwvLRk5jipXc7qLfwp_QrPYotp4gijN5MK/pub?gid=0&single=true&output=tsv",
-  YEAR: 2026,
+const TSV_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR1CFXBvdEojaE0WJOyIZyJgjFhbidzASj4qzfFkNpFe76lJxFVRUEh5JbSDWKN4TWK_9zC97WD6SjV/pub?gid=0&single=true&output=tsv";
 
-  DAYS: ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"],
-  MONTHS: [
-    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
-    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
-  ],
+const YEAR = 2026;
+const FETCH_TIMEOUT_MS = 15000;
+const AUTO_REFRESH_MS = 120000; // 2 min
+const FOCUS_REFRESH_GAP_MS = 12000;
 
-  // Si el viewport está MUY pequeño, el calendario grid se vuelve ilegible.
-  // En ese caso renderizamos una vista lista para el mes (mucho mejor en móvil pequeño).
-  LIST_VIEW_MAX_WIDTH: 420,
-
-  // Cache TSV
-  CACHE_KEY: "planner_tsv_cache_v1",
-  CACHE_TTL_MS: 1000 * 60 * 60 * 24 * 3 // 3 días
-};
+const DAYS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const MONTHS = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+];
 
 /**********************************************************
  * DOM
@@ -37,308 +33,543 @@ const byId = (id) => document.getElementById(id);
 /**********************************************************
  * STATE
  **********************************************************/
-let allDays = [];                  // array de records
-let dayByISO = new Map();          // iso -> record (lookup rápido)
-let monthWeeks = [];
+let allDays = [];
 let currentMonth = 0;
 let currentWeekIndex = 0;
+let monthWeeks = [];
 
-let lastLayoutMode = null;         // "grid" o "list" (para re-render en resize)
+let dayMap = new Map();
+let monthBuckets = Array.from({ length: 12 }, () => []);
+
+let refreshTimer = null;
+let lastLoadAt = 0;
+let isLoading = false;
 
 /**********************************************************
- * HELPERS (General)
+ * HELPERS GENERALES
  **********************************************************/
-function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
-
-function safeSetText(id, text){
-  const el = byId(id);
-  if(el) el.textContent = text;
+function tsvToRows(tsv) {
+  return String(tsv || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => line.split("\t").map((v) => (v ?? "").trim()));
 }
 
-function pad2(n){ return String(n).padStart(2,"0"); }
+function parseDMY(str) {
+  if (!str) return null;
 
-function toISODateKey(date){
-  return `${date.getFullYear()}-${pad2(date.getMonth()+1)}-${pad2(date.getDate())}`;
+  const parts = String(str).trim().split("/");
+  if (parts.length !== 3) return null;
+
+  const [d, m, y] = parts.map(Number);
+  if (!d || !m || !y) return null;
+
+  const date = new Date(y, m - 1, d);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== y ||
+    date.getMonth() !== m - 1 ||
+    date.getDate() !== d
+  ) {
+    return null;
+  }
+
+  return date;
 }
 
-function sameDay(a,b){
-  return a.getFullYear()===b.getFullYear()
-    && a.getMonth()===b.getMonth()
-    && a.getDate()===b.getDate();
+function parseTime(str) {
+  if (str === null || str === undefined) return null;
+
+  const raw = String(str).trim();
+  if (!raw || raw === "-") return null;
+
+  const s = raw.toLowerCase();
+  const match = s.match(/^(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?$/i);
+  if (!match) return null;
+
+  let h = Number(match[1]);
+  let m = Number(match[2] || 0);
+  const meridiem = match[3] || "";
+
+  if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || m < 0 || m > 59) {
+    return null;
+  }
+
+  if (meridiem) {
+    if (h < 1 || h > 12) return null;
+    if (meridiem === "pm" && h !== 12) h += 12;
+    if (meridiem === "am" && h === 12) h = 0;
+  } else {
+    if (h > 23) return null;
+  }
+
+  return h * 60 + m;
 }
 
-function fmtDM(date){
-  return `${pad2(date.getDate())}/${pad2(date.getMonth()+1)}`;
-}
-function fmtDMY(date){
-  return `${pad2(date.getDate())}/${pad2(date.getMonth()+1)}/${date.getFullYear()}`;
-}
-
-function inRange(date, start, end){
-  return date >= start && date <= end;
+function minToHHMM(min) {
+  if (min === null || min === undefined || Number.isNaN(min)) return "--:--";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-/* ===== Fechas y semanas (lunes-domingo) ===== */
-function startOfWeekMonday(date){
+function fmtHours(hours) {
+  return `${Number(hours || 0).toFixed(1)}h`;
+}
+
+function sameDay(a, b) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function isoKeyFromDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function startOfDay(date) {
   const d = new Date(date);
-  const wd = (d.getDay() + 6) % 7; // lun=0
-  d.setDate(d.getDate() - wd);
-  d.setHours(0,0,0,0);
+  d.setHours(0, 0, 0, 0);
   return d;
 }
-function endOfWeekSunday(date){
+
+function endOfDay(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function startOfWeekMonday(date) {
+  const d = startOfDay(date);
+  const wd = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - wd);
+  return d;
+}
+
+function endOfWeekSunday(date) {
   const s = startOfWeekMonday(date);
   const e = new Date(s);
   e.setDate(e.getDate() + 6);
-  e.setHours(23,59,59,999);
+  e.setHours(23, 59, 59, 999);
   return e;
 }
 
-function getWeeksForMonth(year, month){
+function getWeeksForMonth(year, month) {
   const first = new Date(year, month, 1);
-  const last  = new Date(year, month + 1, 0);
+  const last = new Date(year, month + 1, 0);
 
   let cursor = startOfWeekMonday(first);
   const weeks = [];
 
-  while(cursor <= last){
+  while (cursor <= last) {
     const start = new Date(cursor);
-    const end   = endOfWeekSunday(cursor);
+    const end = endOfWeekSunday(cursor);
 
-    if(end >= first && start <= last){
+    if (end >= first && start <= last) {
       weeks.push({ start, end });
     }
+
     cursor.setDate(cursor.getDate() + 7);
   }
+
   return weeks;
 }
 
-function getWeeksForYear(year){
+function getWeeksForYear(year) {
   const first = new Date(year, 0, 1);
-  const last  = new Date(year, 11, 31);
+  const last = new Date(year, 11, 31);
 
   let cursor = startOfWeekMonday(first);
   const weeks = [];
 
-  while(cursor <= last){
+  while (cursor <= last) {
     const start = new Date(cursor);
-    const end   = endOfWeekSunday(cursor);
+    const end = endOfWeekSunday(cursor);
     weeks.push({ start, end });
     cursor.setDate(cursor.getDate() + 7);
   }
+
   return weeks;
 }
 
+function inRange(date, start, end) {
+  return date >= start && date <= end;
+}
+
+function fmtDM(date) {
+  const d = String(date.getDate()).padStart(2, "0");
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  return `${d}/${m}`;
+}
+
+function fmtDMY(date) {
+  const d = String(date.getDate()).padStart(2, "0");
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const y = date.getFullYear();
+  return `${d}/${m}/${y}`;
+}
+
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 720px)").matches;
+}
+
+function safeSetText(id, text) {
+  const el = byId(id);
+  if (el) el.textContent = text;
+}
+
+function safeSetHTML(id, html) {
+  const el = byId(id);
+  if (el) el.innerHTML = html;
+}
+
+function escapeHTML(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function showFatalError(message) {
+  const targets = ["calendarGrid", "totalsGrid", "lunchDaysList"];
+  targets.forEach((id) => {
+    const el = byId(id);
+    if (el) {
+      el.innerHTML = `<div class="sub" style="padding:8px 0;">${escapeHTML(message)}</div>`;
+    }
+  });
+
+  safeSetText("weekLabel", "No fue posible cargar los datos");
+  safeSetText("monthLabel", `Planner ${YEAR}`);
+}
+
 /**********************************************************
- * HELPERS (TSV / Parsing)
+ * REGLA DE ALMUERZO
  **********************************************************/
-function tsvToRows(tsv){
-  return String(tsv || "")
-    .replace(/\r/g,"")
-    .split("\n")
-    .filter(l => l.trim())
-    .map(l => l.split("\t").map(v => (v ?? "").trim()));
-}
-
-function parseDMY(str){
-  if(!str) return null;
-  const s = String(str).trim();
-  const parts = s.split("/");
-  if(parts.length < 3) return null;
-  const d = Number(parts[0]);
-  const m = Number(parts[1]);
-  const y = Number(parts[2]);
-  if(!d || !m || !y) return null;
-  return new Date(y, m-1, d);
-}
-
-function parseTime(str){
-  if(!str || str === "-") return null;
-  const s = String(str).toLowerCase().trim();
-
-  // soporta: "08:00", "8:00", "8:00am", "8:00 pm"
-  const cleaned = s.replace(/\s+/g,"");
-  const isPM = cleaned.includes("pm");
-  const isAM = cleaned.includes("am");
-
-  const base = cleaned.replace(/am|pm/g,"");
-  const parts = base.split(":");
-  if(!parts[0]) return null;
-
-  let h = Number(parts[0]);
-  let m = Number(parts[1] || 0);
-
-  if(Number.isNaN(h) || Number.isNaN(m)) return null;
-
-  if(isPM && h !== 12) h += 12;
-  if(isAM && h === 12) h = 0;
-
-  return h*60 + m;
-}
-
-function minToHHMM(min){
-  const h = Math.floor(min/60);
-  const m = min % 60;
-  return `${pad2(h)}:${pad2(m)}`;
-}
-
-/* ===== Almuerzo =====
-   Regla: si rawHours > 6h, entonces 1h es almuerzo (no cuenta).
-*/
-function lunchDeduction(rawHours){
+function lunchDeduction(rawHours) {
   return rawHours > 6 ? 1 : 0;
 }
-function effectiveHours(rawHours){
-  const lunch = lunchDeduction(rawHours);
-  return Math.max(0, rawHours - lunch);
+
+function effectiveHours(rawHours) {
+  return Math.max(0, rawHours - lunchDeduction(rawHours));
 }
 
 /**********************************************************
- * CACHE (TSV)
+ * FETCH ROBUSTO
  **********************************************************/
-function cacheWrite(tsvText){
-  try{
-    const payload = { t: Date.now(), v: String(tsvText || "") };
-    localStorage.setItem(CFG.CACHE_KEY, JSON.stringify(payload));
-  }catch(e){}
-}
+async function fetchTextWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-function cacheRead(){
-  try{
-    const raw = localStorage.getItem(CFG.CACHE_KEY);
-    if(!raw) return null;
-    const parsed = JSON.parse(raw);
-    if(!parsed?.v || !parsed?.t) return null;
-    if(Date.now() - parsed.t > CFG.CACHE_TTL_MS) return null;
-    return String(parsed.v);
-  }catch(e){
-    return null;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        Pragma: "no-cache"
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} al cargar el TSV`);
+    }
+
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function fetchTSV(){
-  const url = CFG.TSV_URL + "&t=" + Date.now();
-  const res = await fetch(url, { cache: "no-store" });
-  if(!res.ok) throw new Error(`HTTP ${res.status}`);
-  const tsv = await res.text();
-  cacheWrite(tsv);
-  return tsv;
-}
-
 /**********************************************************
- * DATA BUILD
+ * NORMALIZACIÓN / ÍNDICES
  **********************************************************/
-function buildFromTSV(tsvText){
-  const rows = tsvToRows(tsvText);
-  if(!rows.length) return;
+function rebuildIndexes() {
+  dayMap = new Map();
+  monthBuckets = Array.from({ length: 12 }, () => []);
 
-  // Intento de header mapping (si hay encabezados)
-  const headerRow = rows[0].map(x => String(x || "").toLowerCase());
-  const hasHeader = headerRow.some(h => h.includes("fecha") || h.includes("día") || h.includes("inicio") || h.includes("fin"));
-
-  // Fallback por índices (tu suposición original):
-  // r[1] fecha, r[2] inicio, r[3] fin, r[4]/r[5] nota
-  let idxFecha = 1, idxIni = 2, idxFin = 3, idxNotaA = 4, idxNotaB = 5;
-
-  if(hasHeader){
-    const findIdx = (pred) => headerRow.findIndex(pred);
-
-    const fFecha = findIdx(h => h.includes("fecha"));
-    const fIni   = findIdx(h => h.includes("inicio") || h.includes("entrada") || h.includes("hora inicio"));
-    const fFin   = findIdx(h => h.includes("fin") || h.includes("salida") || h.includes("hora fin"));
-    const fNota  = findIdx(h => h.includes("nota") || h.includes("observ") || h.includes("coment"));
-
-    if(fFecha >= 0) idxFecha = fFecha;
-    if(fIni >= 0) idxIni = fIni;
-    if(fFin >= 0) idxFin = fFin;
-    if(fNota >= 0){
-      idxNotaA = fNota;
-      idxNotaB = fNota;
+  for (const day of allDays) {
+    dayMap.set(isoKeyFromDate(day.date), day);
+    if (day.m >= 0 && day.m < 12) {
+      monthBuckets[day.m].push(day);
     }
   }
 
-  const start = hasHeader ? 1 : 0;
+  for (let i = 0; i < 12; i++) {
+    monthBuckets[i].sort((a, b) => a.date - b.date);
+  }
+}
 
-  allDays = [];
-  dayByISO = new Map();
+function getDayRecord(date) {
+  return dayMap.get(isoKeyFromDate(date)) || null;
+}
 
-  for(let i=start; i<rows.length; i++){
-    const r = rows[i];
+function getMonthData(month) {
+  return monthBuckets[month] || [];
+}
 
-    const date = parseDMY(r[idxFecha]);
-    if(!date || date.getFullYear() !== CFG.YEAR) continue;
+function getRecordsInRange(start, end) {
+  return allDays.filter((d) => d.hasJornada && inRange(d.date, start, end));
+}
 
-    const startMin = parseTime(r[idxIni]);
-    const endMin   = parseTime(r[idxFin]);
-    const hasJornada = startMin !== null && endMin !== null;
+/**********************************************************
+ * LOAD DATA
+ **********************************************************/
+async function load({ silent = false } = {}) {
+  if (isLoading) return;
+  isLoading = true;
 
-    const nota = (r[idxNotaB] || r[idxNotaA] || "").trim();
+  if (!silent) {
+    safeSetText("monthLabel", "Cargando...");
+    safeSetText("weekLabel", "Cargando semana...");
+  }
 
-    const rawHours = hasJornada ? Math.max(0, (endMin - startMin) / 60) : 0;
-    const lunchHours = hasJornada ? lunchDeduction(rawHours) : 0;
-    const hours = hasJornada ? effectiveHours(rawHours) : 0;
+  try {
+    const tsv = await fetchTextWithTimeout(`${TSV_URL}&t=${Date.now()}`);
+    const rows = tsvToRows(tsv);
 
-    const weekday = (date.getDay()+6)%7; // lunes=0
-    const iso = toISODateKey(date);
+    if (!rows.length) {
+      throw new Error("El TSV llegó vacío");
+    }
 
-    const rec = {
-      date,
-      iso,
-      y: date.getFullYear(),
-      m: date.getMonth(),
-      d: date.getDate(),
-      weekday,
+    const headerCell = (rows[0]?.[0] || "").toLowerCase();
+    const startRowIndex =
+      headerCell.includes("día") || headerCell.includes("dia") ? 1 : 0;
 
-      hasJornada,
-      startMin,
-      endMin,
+    const parsed = [];
 
-      rawHours,
-      lunchHours,
-      hours,
+    for (let i = startRowIndex; i < rows.length; i++) {
+      const r = rows[i];
 
-      label: hasJornada
+      const date = parseDMY(r[1]);
+      if (!date || date.getFullYear() !== YEAR) continue;
+
+      const startMin = parseTime(r[2]);
+      const endMin = parseTime(r[3]);
+      const nota = r[5] || r[4] || "";
+
+      const hasJornada =
+        startMin !== null && endMin !== null && endMin > startMin;
+
+      const rawHours = hasJornada ? Math.max(0, (endMin - startMin) / 60) : 0;
+      const lunchHours = hasJornada ? lunchDeduction(rawHours) : 0;
+      const hours = hasJornada ? effectiveHours(rawHours) : 0;
+
+      const timeLabel = hasJornada
         ? `${minToHHMM(startMin)} – ${minToHHMM(endMin)}`
-        : (nota || "Sin jornada"),
+        : "";
 
-      nota
-    };
+      parsed.push({
+        date: startOfDay(date),
+        y: date.getFullYear(),
+        m: date.getMonth(),
+        d: date.getDate(),
+        weekday: (date.getDay() + 6) % 7,
+        hasJornada,
+        startMin,
+        endMin,
+        rawHours,
+        lunchHours,
+        hours,
+        note: nota,
+        label: hasJornada ? timeLabel : nota || "Sin jornada"
+      });
+    }
 
-    allDays.push(rec);
-    dayByISO.set(iso, rec);
+    allDays = parsed.sort((a, b) => a.date - b.date);
+    rebuildIndexes();
+
+    syncCurrentMonthToToday();
+    syncWeekIndexToCurrentContext();
+
+    lastLoadAt = Date.now();
+    render();
+  } finally {
+    isLoading = false;
   }
 }
 
 /**********************************************************
- * INIT MONTH
+ * SINCRONIZACIÓN DE MES / SEMANA ACTUALES
  **********************************************************/
-function initMonth(){
+function syncCurrentMonthToToday() {
   const now = new Date();
-  currentMonth = (now.getFullYear() === CFG.YEAR) ? now.getMonth() : 0;
-  currentWeekIndex = 0;
+  currentMonth = now.getMonth();
+}
+
+function findWeekIndexForDate(weeks, date) {
+  const target = startOfDay(date).getTime();
+
+  for (let i = 0; i < weeks.length; i++) {
+    const start = startOfDay(weeks[i].start).getTime();
+    const end = endOfDay(weeks[i].end).getTime();
+    if (target >= start && target <= end) return i;
+  }
+
+  return -1;
+}
+
+function syncWeekIndexToCurrentContext() {
+  monthWeeks = getWeeksForMonth(YEAR, currentMonth);
+
+  if (!monthWeeks.length) {
+    currentWeekIndex = 0;
+    return;
+  }
+
+  const now = new Date();
+
+  if (now.getFullYear() === YEAR && now.getMonth() === currentMonth) {
+    const idx = findWeekIndexForDate(monthWeeks, now);
+    currentWeekIndex = idx >= 0 ? idx : 0;
+    return;
+  }
+
+  currentWeekIndex = clamp(currentWeekIndex, 0, monthWeeks.length - 1);
 }
 
 /**********************************************************
- * RENDER MAIN
+ * DATA HELPERS POR MES / AÑO
  **********************************************************/
-function getLayoutMode(){
-  const w = window.innerWidth || 9999;
-  return (w <= CFG.LIST_VIEW_MAX_WIDTH) ? "list" : "grid";
+function getMonthJornadaDays(month = currentMonth) {
+  return getMonthData(month).filter((d) => d.hasJornada);
 }
 
-function render(){
-  const monthLabel = byId("monthLabel");
-  if(monthLabel) monthLabel.textContent = `${CFG.MONTHS[currentMonth]} ${CFG.YEAR}`;
+function getMonthLunchDays(month = currentMonth) {
+  return getMonthJornadaDays(month).filter((d) => d.lunchHours > 0);
+}
 
-  monthWeeks = getWeeksForMonth(CFG.YEAR, currentMonth);
-  currentWeekIndex = clamp(currentWeekIndex, 0, Math.max(0, monthWeeks.length - 1));
+function getMonthWeekTotals(month = currentMonth) {
+  const weeks = getWeeksForMonth(YEAR, month);
+  const monthData = getMonthJornadaDays(month);
 
-  const mode = getLayoutMode();
-  lastLayoutMode = mode;
+  return weeks.map((w) => {
+    let sum = 0;
+    for (const d of monthData) {
+      if (inRange(d.date, w.start, w.end)) sum += d.hours;
+    }
+    return sum;
+  });
+}
 
-  if(mode === "list") renderCalendarList();
-  else renderCalendarGrid();
+function getMonthWeekdayTotals(month = currentMonth) {
+  const totals = [0, 0, 0, 0, 0, 0, 0];
+  const monthData = getMonthJornadaDays(month);
 
+  for (const d of monthData) {
+    totals[d.weekday] += d.hours;
+  }
+
+  return totals;
+}
+
+function getYearJornadaDays() {
+  return allDays.filter((d) => d.y === YEAR && d.hasJornada);
+}
+
+function getYearMonthTotals() {
+  const totals = Array(12).fill(0);
+  for (const d of getYearJornadaDays()) {
+    totals[d.m] += d.hours;
+  }
+  return totals;
+}
+
+function getYearMonthRawTotals() {
+  const totals = Array(12).fill(0);
+  for (const d of getYearJornadaDays()) {
+    totals[d.m] += d.rawHours;
+  }
+  return totals;
+}
+
+function getYearWeekdayTotals() {
+  const totals = [0, 0, 0, 0, 0, 0, 0];
+  for (const d of getYearJornadaDays()) {
+    totals[d.weekday] += d.hours;
+  }
+  return totals;
+}
+
+/**********************************************************
+ * UI HELPERS
+ **********************************************************/
+function getCompactCellText(dayRecord) {
+  if (!dayRecord) return "Sin jornada";
+
+  if (!dayRecord.hasJornada) {
+    return dayRecord.label || "Sin jornada";
+  }
+
+  const lunchMark = dayRecord.lunchHours ? " 🍽️" : "";
+
+  if (isMobileLayout()) {
+    return `${fmtHours(dayRecord.hours)} · ${minToHHMM(dayRecord.startMin)}-${minToHHMM(dayRecord.endMin)}${lunchMark}`;
+  }
+
+  return `${fmtHours(dayRecord.hours)} · ${dayRecord.label}${lunchMark}`;
+}
+
+function getCellTitle(dayRecord) {
+  if (!dayRecord) return "Sin jornada";
+
+  if (!dayRecord.hasJornada) {
+    return dayRecord.label || "Sin jornada";
+  }
+
+  const lunchText = dayRecord.lunchHours
+    ? ` · descuenta ${fmtHours(dayRecord.lunchHours)} por almuerzo`
+    : "";
+
+  return `${fmtDMY(dayRecord.date)} · ${fmtHours(dayRecord.hours)} efectivas · ${dayRecord.label}${lunchText}`;
+}
+
+function setWeekNavState() {
+  const prevWeek = byId("prevWeek");
+  const nextWeek = byId("nextWeek");
+
+  if (prevWeek) {
+    prevWeek.disabled = currentWeekIndex <= 0;
+    prevWeek.setAttribute(
+      "aria-disabled",
+      prevWeek.disabled ? "true" : "false"
+    );
+  }
+
+  if (nextWeek) {
+    nextWeek.disabled = currentWeekIndex >= monthWeeks.length - 1;
+    nextWeek.setAttribute(
+      "aria-disabled",
+      nextWeek.disabled ? "true" : "false"
+    );
+  }
+}
+
+/**********************************************************
+ * RENDER MASTER
+ **********************************************************/
+function render() {
+  monthWeeks = getWeeksForMonth(YEAR, currentMonth);
+  currentWeekIndex = clamp(
+    currentWeekIndex,
+    0,
+    Math.max(0, monthWeeks.length - 1)
+  );
+
+  safeSetText("monthLabel", `${MONTHS[currentMonth]} ${YEAR}`);
+
+  setWeekNavState();
+  renderCalendar();
   renderWeekBars();
   renderTotals();
   renderKPIs();
@@ -346,36 +577,47 @@ function render(){
 }
 
 /**********************************************************
- * CALENDAR (GRID) - EFECTIVAS
+ * CALENDAR GRID
  **********************************************************/
-function renderCalendarGrid(){
+function renderCalendar() {
   const grid = byId("calendarGrid");
-  if(!grid) return;
+  if (!grid) return;
 
   grid.innerHTML = "";
 
-  const first = new Date(CFG.YEAR, currentMonth, 1);
-  const offset = (first.getDay() + 6) % 7; // lunes=0
-  const daysInMonth = new Date(CFG.YEAR, currentMonth + 1, 0).getDate();
-
+  const first = new Date(YEAR, currentMonth, 1);
+  const offset = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(YEAR, currentMonth + 1, 0).getDate();
   const totalCells = 42;
+  const today = new Date();
 
-  for(let i=0; i<totalCells; i++){
+  const frag = document.createDocumentFragment();
+
+  for (let i = 0; i < totalCells; i++) {
     const cell = document.createElement("div");
     cell.className = "calCell";
 
     const dayNumber = i - offset + 1;
 
-    if(dayNumber < 1 || dayNumber > daysInMonth){
+    if (dayNumber < 1 || dayNumber > daysInMonth) {
       cell.classList.add("off");
-      cell.innerHTML = `<div class="calDate"></div><div class="calHours"></div>`;
-      grid.appendChild(cell);
+
+      const top = document.createElement("div");
+      top.className = "calDate";
+      top.innerHTML = "&nbsp;";
+
+      const bottom = document.createElement("div");
+      bottom.className = "calHours";
+      bottom.innerHTML = "&nbsp;";
+
+      cell.appendChild(top);
+      cell.appendChild(bottom);
+      frag.appendChild(cell);
       continue;
     }
 
-    const date = new Date(CFG.YEAR, currentMonth, dayNumber);
-    const iso = toISODateKey(date);
-    const data = dayByISO.get(iso) || null;
+    const date = new Date(YEAR, currentMonth, dayNumber);
+    const data = getDayRecord(date);
 
     const top = document.createElement("div");
     top.className = "calDate";
@@ -383,191 +625,92 @@ function renderCalendarGrid(){
 
     const bottom = document.createElement("div");
     bottom.className = "calHours";
+    bottom.textContent = getCompactCellText(data);
 
-    if(data && data.hasJornada){
+    if (data && data.hasJornada) {
       cell.classList.add("on");
-      const lunchMark = data.lunchHours ? " 🍽️" : "";
-      bottom.textContent = `${data.hours.toFixed(1)}h · ${data.label}${lunchMark}`;
-    } else if(data && !data.hasJornada){
-      bottom.textContent = data.label;
-    } else {
-      bottom.textContent = "Sin jornada";
     }
+
+    if (sameDay(date, today)) {
+      cell.classList.add("today");
+    }
+
+    cell.title = getCellTitle(data);
+    cell.setAttribute("aria-label", `${fmtDMY(date)} · ${getCellTitle(data)}`);
 
     cell.appendChild(top);
     cell.appendChild(bottom);
-    grid.appendChild(cell);
+    frag.appendChild(cell);
   }
+
+  grid.appendChild(frag);
 }
 
 /**********************************************************
- * CALENDAR (LIST) - MÓVIL PEQUEÑO
- * - Mucho más legible cuando 7 columnas se vuelven mini.
+ * WEEK BARS
+ * Importante:
+ * - La semana visible usa TODOS los días dentro del rango,
+ *   aunque la semana cruce mes.
  **********************************************************/
-function renderCalendarList(){
-  const grid = byId("calendarGrid");
-  if(!grid) return;
-
-  grid.innerHTML = "";
-
-  // en modo lista usamos una sola columna
-  grid.style.display = "grid";
-  grid.style.gridTemplateColumns = "1fr";
-  grid.style.gap = "10px";
-
-  const daysInMonth = new Date(CFG.YEAR, currentMonth + 1, 0).getDate();
-
-  for(let day=1; day<=daysInMonth; day++){
-    const date = new Date(CFG.YEAR, currentMonth, day);
-    const iso = toISODateKey(date);
-    const data = dayByISO.get(iso) || null;
-
-    const cell = document.createElement("div");
-    cell.className = "calCell";
-    cell.style.minHeight = "auto";
-
-    const header = document.createElement("div");
-    header.className = "calDate";
-    header.style.display = "flex";
-    header.style.justifyContent = "space-between";
-    header.style.alignItems = "baseline";
-    header.style.gap = "10px";
-
-    const left = document.createElement("div");
-    left.textContent = `${CFG.DAYS[(date.getDay()+6)%7]} ${day}`;
-
-    const right = document.createElement("div");
-    right.style.fontWeight = "950";
-    right.style.color = "rgba(100,116,139,.95)";
-    right.style.fontSize = ".85rem";
-    right.textContent = fmtDM(date);
-
-    header.appendChild(left);
-    header.appendChild(right);
-
-    const body = document.createElement("div");
-    body.className = "calHours";
-    body.style.marginTop = "6px";
-    body.style.display = "flex";
-    body.style.flexDirection = "column";
-    body.style.gap = "6px";
-    body.style.webkitLineClamp = "unset";
-    body.style.overflow = "visible";
-
-    if(data && data.hasJornada){
-      cell.classList.add("on");
-      const lunchMark = data.lunchHours ? " 🍽️" : "";
-      const line1 = document.createElement("div");
-      line1.textContent = `${data.hours.toFixed(1)}h efectivas${lunchMark}`;
-      line1.style.fontWeight = "950";
-
-      const line2 = document.createElement("div");
-      line2.textContent = `${data.label}`;
-      line2.style.color = "rgba(71,85,105,.95)";
-      line2.style.fontWeight = "850";
-
-      if(data.nota){
-        const line3 = document.createElement("div");
-        line3.textContent = `Nota: ${data.nota}`;
-        line3.style.color = "rgba(100,116,139,.95)";
-        line3.style.fontWeight = "800";
-        body.appendChild(line1);
-        body.appendChild(line2);
-        body.appendChild(line3);
-      } else {
-        body.appendChild(line1);
-        body.appendChild(line2);
-      }
-    } else if(data && !data.hasJornada){
-      body.textContent = data.label;
-    } else {
-      body.textContent = "Sin jornada";
-    }
-
-    cell.appendChild(header);
-    cell.appendChild(body);
-    grid.appendChild(cell);
-  }
-
-  // Al salir de modo lista, el grid normal vuelve a 7 cols en renderCalendarGrid()
-}
-
-/**********************************************************
- * WEEK BARS (Semana seleccionada) - EFECTIVAS
- **********************************************************/
-function renderWeekBars(){
+function renderWeekBars() {
   const week = monthWeeks[currentWeekIndex] || null;
-  const weekLabel = byId("weekLabel");
-  if(!week || !weekLabel) return;
 
-  weekLabel.textContent =
-    `Semana ${currentWeekIndex+1} · Del ${fmtDM(week.start)} al ${fmtDM(week.end)}`;
+  if (!week) {
+    safeSetText("weekLabel", "Semana · Sin datos");
+    return;
+  }
 
-  const totals = [0,0,0,0,0,0,0];
+  safeSetText(
+    "weekLabel",
+    `Semana ${currentWeekIndex + 1} · Del ${fmtDM(week.start)} al ${fmtDM(week.end)}`
+  );
 
-  // Sumamos jornadas del rango
-  for(const d of allDays){
-    if(!d.hasJornada) continue;
-    if(d.m !== currentMonth) {
-      // OJO: una semana puede cruzar meses, pero la sección "Carga por semana"
-      // para el mes normalmente se entiende como la semana mostrada del calendario.
-      // Aun así, tu lógica original incluía todo el rango sin filtrar mes.
-      // Mantenemos eso: solo revisamos rango.
-    }
-    if(inRange(d.date, week.start, week.end)){
-      totals[d.weekday] += d.hours;
-    }
+  const totals = [0, 0, 0, 0, 0, 0, 0];
+  const weekRecords = getRecordsInRange(week.start, week.end);
+
+  for (const d of weekRecords) {
+    totals[d.weekday] += d.hours;
   }
 
   const max = Math.max(...totals, 1);
-
   const map = [
-    ["lun",0],["mar",1],["mie",2],["jue",3],
-    ["vie",4],["sab",5],["dom",6]
+    ["lun", 0],
+    ["mar", 1],
+    ["mie", 2],
+    ["jue", 3],
+    ["vie", 4],
+    ["sab", 5],
+    ["dom", 6]
   ];
 
-  map.forEach(([id,i])=>{
-    const bar = byId("bar-"+id);
-    const h = byId("hours-"+id);
-    if(!bar || !h) return;
+  for (const [id, i] of map) {
+    const bar = byId(`bar-${id}`);
+    const h = byId(`hours-${id}`);
+    if (!bar || !h) continue;
 
     bar.innerHTML = "";
+
     const fill = document.createElement("div");
     fill.className = "barFill";
-    fill.style.height = `${(totals[i]/max)*100}%`;
-    bar.appendChild(fill);
+    fill.style.height = `${(totals[i] / max) * 100}%`;
+    fill.title = `${DAYS[i]} · ${fmtHours(totals[i])}`;
+    fill.setAttribute("aria-label", `${DAYS[i]} ${fmtHours(totals[i])}`);
 
-    h.textContent = `${totals[i].toFixed(1)}h`;
-  });
+    bar.appendChild(fill);
+    h.textContent = fmtHours(totals[i]);
+  }
 }
 
 /**********************************************************
- * TOTALS - EFECTIVAS
+ * TOTALS
  **********************************************************/
-function renderTotals(){
+function renderTotals() {
   const totalsGrid = byId("totalsGrid");
-  if(!totalsGrid) return;
+  if (!totalsGrid) return;
 
-  const monthData = allDays.filter(d => d.m === currentMonth);
-  const jornadaDays = monthData.filter(d => d.hasJornada);
-
-  // Totales por día de semana (mes)
-  const monthDayTotals = [0,0,0,0,0,0,0];
-  for(const d of jornadaDays){
-    monthDayTotals[d.weekday] += d.hours;
-  }
-
-  // Totales por semana (mes) usando monthWeeks (rango real)
-  const weekTotals = monthWeeks.map(w => {
-    let sum = 0;
-    for(const d of allDays){
-      if(!d.hasJornada) continue;
-      if(inRange(d.date, w.start, w.end)) sum += d.hours;
-    }
-    return sum;
-  });
-
-  const monthTotal = weekTotals.reduce((a,b)=>a+b,0);
+  const weekdayTotals = getMonthWeekdayTotals(currentMonth);
+  const weekTotals = getMonthWeekTotals(currentMonth);
+  const monthTotal = weekTotals.reduce((a, b) => a + b, 0);
 
   totalsGrid.innerHTML = "";
 
@@ -576,9 +719,14 @@ function renderTotals(){
   box1.innerHTML = `
     <div class="totalsTitle">Totales por día (mes) · efectivas</div>
     <div class="totalsList">
-      ${CFG.DAYS.map((d,i)=>`
-        <div class="totalsRow"><span>${d}</span><span>${monthDayTotals[i].toFixed(1)}h</span></div>
-      `).join("")}
+      ${DAYS.map(
+        (d, i) => `
+        <div class="totalsRow">
+          <span>${d}</span>
+          <span>${fmtHours(weekdayTotals[i])}</span>
+        </div>
+      `
+      ).join("")}
     </div>
   `;
 
@@ -587,11 +735,19 @@ function renderTotals(){
   box2.innerHTML = `
     <div class="totalsTitle">Totales por semana (mes) · efectivas</div>
     <div class="totalsList">
-      ${weekTotals.map((h,i)=>`
-        <div class="totalsRow"><span>Semana ${i+1}</span><span>${h.toFixed(1)}h</span></div>
-      `).join("")}
+      ${weekTotals
+        .map(
+          (hours, i) => `
+        <div class="totalsRow">
+          <span>Semana ${i + 1}</span>
+          <span>${fmtHours(hours)}</span>
+        </div>
+      `
+        )
+        .join("")}
       <div class="totalsRow" style="margin-top:8px; font-weight:950; color: rgba(15,23,42,.88);">
-        <span>Total mes</span><span>${monthTotal.toFixed(1)}h</span>
+        <span>Total mes</span>
+        <span>${fmtHours(monthTotal)}</span>
       </div>
     </div>
   `;
@@ -601,93 +757,90 @@ function renderTotals(){
 }
 
 /**********************************************************
- * KPIs - mensuales EFECTIVOS
+ * KPIs MENSUALES
  **********************************************************/
-function renderKPIs(){
-  const monthData = allDays.filter(d => d.m === currentMonth);
-  const jornadaDays = monthData.filter(d => d.hasJornada);
+function renderKPIs() {
+  const monthData = getMonthData(currentMonth);
+  const jornadaDays = monthData.filter((d) => d.hasJornada);
+  const lunchDays = jornadaDays.filter((d) => d.lunchHours > 0);
 
-  // Almuerzo (solo reporte)
-  const lunchDays = jornadaDays.filter(d => d.lunchHours > 0);
-  const lunchDaysCount = lunchDays.length;
-  const lunchHoursTotal = lunchDays.reduce((a,d)=>a + d.lunchHours, 0);
+  const rawTotal = jornadaDays.reduce((a, d) => a + d.rawHours, 0);
+  const effectiveTotal = jornadaDays.reduce((a, d) => a + d.hours, 0);
+  const lunchHoursTotal = lunchDays.reduce((a, d) => a + d.lunchHours, 0);
 
-  // Totales mes
-  const rawTotal = jornadaDays.reduce((a,d)=>a + d.rawHours, 0);     // informativo
-  const effectiveTotal = jornadaDays.reduce((a,d)=>a + d.hours, 0);  // real
-
-  // KPI: Día con mayor jornada EFECTIVA
   let topDay = null;
-  for(const d of jornadaDays){
-    if(!topDay || d.hours > topDay.hours) topDay = d;
+  for (const d of jornadaDays) {
+    if (!topDay || d.hours > topDay.hours) topDay = d;
   }
 
-  // KPI: Semana más cargada (EFECTIVA)
-  const weekTotals = monthWeeks.map(w => {
-    let sum = 0;
-    for(const d of allDays){
-      if(!d.hasJornada) continue;
-      if(inRange(d.date, w.start, w.end)) sum += d.hours;
-    }
-    return sum;
-  });
-
+  const weekTotals = getMonthWeekTotals(currentMonth);
   let topWeekIndex = 0;
-  for(let i=1;i<weekTotals.length;i++){
-    if(weekTotals[i] > weekTotals[topWeekIndex]) topWeekIndex = i;
+  for (let i = 1; i < weekTotals.length; i++) {
+    if (weekTotals[i] > weekTotals[topWeekIndex]) topWeekIndex = i;
   }
 
-  // KPI: Promedio semanal
   const weekAvg = weekTotals.length
-    ? (weekTotals.reduce((a,b)=>a+b,0) / weekTotals.length)
+    ? weekTotals.reduce((a, b) => a + b, 0) / weekTotals.length
     : 0;
 
-  // KPI: Día de semana más pesado
-  const weekdayTotals = [0,0,0,0,0,0,0];
-  for(const d of jornadaDays) weekdayTotals[d.weekday] += d.hours;
-
+  const weekdayTotals = getMonthWeekdayTotals(currentMonth);
   let topWeekday = 0;
-  for(let i=1;i<7;i++){
-    if(weekdayTotals[i] > weekdayTotals[topWeekday]) topWeekday = i;
+  for (let i = 1; i < 7; i++) {
+    if (weekdayTotals[i] > weekdayTotals[topWeekday]) topWeekday = i;
   }
 
-  // === PINTAR ===
-  if(topDay){
-    safeSetText("kpiTopDay", `${pad2(topDay.d)}/${pad2(topDay.m+1)}`);
-    const lunchMark = topDay.lunchHours ? " 🍽️" : "";
-    safeSetText("kpiTopDayHint", `${topDay.hours.toFixed(1)}h · ${topDay.label}${lunchMark}`);
-  } else {
-    safeSetText("kpiTopDay", "--");
-    safeSetText("kpiTopDayHint", "No hay jornadas en este mes");
+  if (byId("kpiTopDay")) {
+    if (topDay) {
+      safeSetText("kpiTopDay", fmtDM(topDay.date));
+      safeSetText(
+        "kpiTopDayHint",
+        `${fmtHours(topDay.hours)} · ${topDay.label}${topDay.lunchHours ? " 🍽️" : ""}`
+      );
+    } else {
+      safeSetText("kpiTopDay", "--");
+      safeSetText("kpiTopDayHint", "No hay jornadas en este mes");
+    }
+
+    safeSetText("kpiTopWeek", `Semana ${topWeekIndex + 1}`);
+    if (monthWeeks[topWeekIndex]) {
+      safeSetText(
+        "kpiTopWeekHint",
+        `${fmtHours(weekTotals[topWeekIndex] || 0)} · Del ${fmtDM(monthWeeks[topWeekIndex].start)} al ${fmtDM(monthWeeks[topWeekIndex].end)}`
+      );
+    } else {
+      safeSetText("kpiTopWeekHint", fmtHours(weekTotals[topWeekIndex] || 0));
+    }
+
+    safeSetText("kpiMonthTotal", fmtHours(effectiveTotal));
+    safeSetText(
+      "kpiMonthTotalHint",
+      "Horas efectivas (almuerzo ya descontado)"
+    );
+
+    safeSetText("kpiWeekAvg", fmtHours(weekAvg));
+    safeSetText("kpiWeekAvgHint", "Promedio semanal efectivo");
+
+    safeSetText("kpiTopWeekday", DAYS[topWeekday]);
+    safeSetText(
+      "kpiTopWeekdayHint",
+      `${fmtHours(weekdayTotals[topWeekday])} acumuladas`
+    );
+
+    safeSetText("kpiDaysWithJornada", String(jornadaDays.length));
+    safeSetText(
+      "kpiDaysWithJornadaHint",
+      `Días con horario asignado en ${MONTHS[currentMonth]}`
+    );
+
+    safeSetText("kpiLunchDays", String(lunchDays.length));
+    safeSetText("kpiLunchDaysHint", "Jornadas > 6h (se descuenta 1h)");
+
+    safeSetText("kpiLunchHours", fmtHours(lunchHoursTotal));
+    safeSetText("kpiLunchHoursHint", "Horas descontadas (NO suman a nada)");
+
+    safeSetText("kpiRawTotal", fmtHours(rawTotal));
+    safeSetText("kpiRawTotalHint", "Informativo: horas sin descuento");
   }
-
-  safeSetText("kpiTopWeek", `Semana ${topWeekIndex+1}`);
-  const w = monthWeeks[topWeekIndex];
-  safeSetText(
-    "kpiTopWeekHint",
-    w ? `${weekTotals[topWeekIndex].toFixed(1)}h · Del ${fmtDM(w.start)} al ${fmtDM(w.end)}` : `${weekTotals[topWeekIndex].toFixed(1)}h`
-  );
-
-  safeSetText("kpiMonthTotal", `${effectiveTotal.toFixed(1)}h`);
-  safeSetText("kpiMonthTotalHint", "Horas efectivas (almuerzo ya descontado)");
-
-  safeSetText("kpiWeekAvg", `${weekAvg.toFixed(1)}h`);
-  safeSetText("kpiWeekAvgHint", "Promedio semanal efectivo");
-
-  safeSetText("kpiTopWeekday", CFG.DAYS[topWeekday]);
-  safeSetText("kpiTopWeekdayHint", `${weekdayTotals[topWeekday].toFixed(1)}h acumuladas`);
-
-  safeSetText("kpiDaysWithJornada", `${jornadaDays.length}`);
-  safeSetText("kpiDaysWithJornadaHint", `Días con horario asignado en ${CFG.MONTHS[currentMonth]}`);
-
-  safeSetText("kpiLunchDays", `${lunchDaysCount}`);
-  safeSetText("kpiLunchDaysHint", "Jornadas > 6h (se descuenta 1h)");
-
-  safeSetText("kpiLunchHours", `${lunchHoursTotal.toFixed(1)}h`);
-  safeSetText("kpiLunchHoursHint", "Horas descontadas (NO suman a nada)");
-
-  safeSetText("kpiRawTotal", `${rawTotal.toFixed(1)}h`);
-  safeSetText("kpiRawTotalHint", "Informativo: horas sin descuento");
 
   renderLunchDaysList(lunchDays);
 }
@@ -695,223 +848,272 @@ function renderKPIs(){
 /**********************************************************
  * KPIs ANUALES
  **********************************************************/
-function renderYearKPIs(){
-  const guard = byId("kpiYearTotal");
-  if(!guard) return;
+function renderYearKPIs() {
+  if (!byId("kpiYearTotal")) return;
 
-  // Conteo de días del año (si no hay registro, cuenta como sin jornada)
-  const yearStart = new Date(CFG.YEAR, 0, 1);
-  const yearEnd = new Date(CFG.YEAR, 11, 31);
+  const jornadaYear = getYearJornadaDays();
 
-  let daysWithJornadaYear = 0;
-  let daysWithoutJornadaYear = 0;
+  const effectiveYearTotal = jornadaYear.reduce((a, d) => a + d.hours, 0);
+  const rawYearTotal = jornadaYear.reduce((a, d) => a + d.rawHours, 0);
+  const lunchHoursYear = jornadaYear.reduce((a, d) => a + d.lunchHours, 0);
 
-  for(let dt = new Date(yearStart); dt <= yearEnd; dt.setDate(dt.getDate() + 1)){
-    const iso = toISODateKey(dt);
-    const rec = dayByISO.get(iso);
-    if(rec && rec.hasJornada) daysWithJornadaYear++;
-    else daysWithoutJornadaYear++;
-  }
+  const monthTotals = getYearMonthTotals();
+  const monthRawTotals = getYearMonthRawTotals();
+  const weekdayTotalsYear = getYearWeekdayTotals();
 
-  const jornadaYear = allDays.filter(d => d.y === CFG.YEAR && d.hasJornada);
+  const monthAvg = monthTotals.reduce((a, b) => a + b, 0) / 12;
 
-  const effectiveYearTotal = jornadaYear.reduce((a,d)=>a + d.hours, 0);
-  const rawYearTotal = jornadaYear.reduce((a,d)=>a + d.rawHours, 0);
-  const lunchHoursYear = jornadaYear.reduce((a,d)=>a + d.lunchHours, 0);
-
-  const monthTotals = Array(12).fill(0);
-  const monthRawTotals = Array(12).fill(0);
-
-  for(const d of jornadaYear){
-    monthTotals[d.m] += d.hours;
-    monthRawTotals[d.m] += d.rawHours;
-  }
-
-  const monthAvg = monthTotals.reduce((a,b)=>a+b,0) / 12;
-
-  // Mes más cargado
   let topMonth = 0;
-  for(let m=1;m<12;m++){
-    if(monthTotals[m] > monthTotals[topMonth]) topMonth = m;
+  for (let i = 1; i < 12; i++) {
+    if (monthTotals[i] > monthTotals[topMonth]) topMonth = i;
   }
-
-  // Día de semana más pesado del año
-  const weekdayTotalsYear = [0,0,0,0,0,0,0];
-  for(const d of jornadaYear) weekdayTotalsYear[d.weekday] += d.hours;
 
   let topWeekdayYear = 0;
-  for(let i=1;i<7;i++){
-    if(weekdayTotalsYear[i] > weekdayTotalsYear[topWeekdayYear]) topWeekdayYear = i;
+  for (let i = 1; i < 7; i++) {
+    if (weekdayTotalsYear[i] > weekdayTotalsYear[topWeekdayYear]) {
+      topWeekdayYear = i;
+    }
   }
 
-  // Semana más cargada del año
-  const yearWeeks = getWeeksForYear(CFG.YEAR);
-  const yearWeekTotals = yearWeeks.map(w=>{
+  const yearWeeks = getWeeksForYear(YEAR);
+  const yearWeekTotals = yearWeeks.map((w) => {
     let sum = 0;
-    for(const d of jornadaYear){
-      if(inRange(d.date, w.start, w.end)) sum += d.hours;
+    for (const d of jornadaYear) {
+      if (inRange(d.date, w.start, w.end)) sum += d.hours;
     }
     return sum;
   });
 
   let topWeekYearIndex = 0;
-  for(let i=1;i<yearWeekTotals.length;i++){
-    if(yearWeekTotals[i] > yearWeekTotals[topWeekYearIndex]) topWeekYearIndex = i;
+  for (let i = 1; i < yearWeekTotals.length; i++) {
+    if (yearWeekTotals[i] > yearWeekTotals[topWeekYearIndex]) {
+      topWeekYearIndex = i;
+    }
   }
 
   const topWeekObj = yearWeeks[topWeekYearIndex];
 
-  safeSetText("kpiYearTotal", `${effectiveYearTotal.toFixed(1)}h`);
-  safeSetText("kpiYearTotalHint", "Horas efectivas del año (almuerzo ya descontado)");
+  let daysWithJornadaYear = 0;
+  let daysWithoutJornadaYear = 0;
 
-  safeSetText("kpiYearMonthAvg", `${monthAvg.toFixed(1)}h`);
+  const yearStart = new Date(YEAR, 0, 1);
+  const yearEnd = new Date(YEAR, 11, 31);
+
+  for (
+    let dt = new Date(yearStart);
+    dt <= yearEnd;
+    dt.setDate(dt.getDate() + 1)
+  ) {
+    const rec = getDayRecord(dt);
+    if (rec && rec.hasJornada) daysWithJornadaYear++;
+    else daysWithoutJornadaYear++;
+  }
+
+  safeSetText("kpiYearTotal", fmtHours(effectiveYearTotal));
+  safeSetText(
+    "kpiYearTotalHint",
+    "Horas efectivas del año (almuerzo ya descontado)"
+  );
+
+  safeSetText("kpiYearMonthAvg", fmtHours(monthAvg));
   safeSetText("kpiYearMonthAvgHint", "Promedio mensual efectivo (12 meses)");
 
-  safeSetText("kpiTopMonth", `${CFG.MONTHS[topMonth]}`);
-  safeSetText("kpiTopMonthHint", `${monthTotals[topMonth].toFixed(1)}h efectivas · ${monthRawTotals[topMonth].toFixed(1)}h sin descuento`);
+  safeSetText("kpiTopMonth", MONTHS[topMonth]);
+  safeSetText(
+    "kpiTopMonthHint",
+    `${fmtHours(monthTotals[topMonth])} efectivas · ${fmtHours(monthRawTotals[topMonth])} sin descuento`
+  );
 
-  safeSetText("kpiTopWeekYear", `Semana ${topWeekYearIndex+1}`);
+  safeSetText("kpiTopWeekYear", `Semana ${topWeekYearIndex + 1}`);
   safeSetText(
     "kpiTopWeekYearHint",
     topWeekObj
-      ? `${yearWeekTotals[topWeekYearIndex].toFixed(1)}h · Del ${fmtDM(topWeekObj.start)} al ${fmtDM(topWeekObj.end)}`
-      : `${yearWeekTotals[topWeekYearIndex].toFixed(1)}h`
+      ? `${fmtHours(yearWeekTotals[topWeekYearIndex])} · Del ${fmtDM(topWeekObj.start)} al ${fmtDM(topWeekObj.end)}`
+      : fmtHours(yearWeekTotals[topWeekYearIndex] || 0)
   );
 
-  safeSetText("kpiTopWeekdayYear", `${CFG.DAYS[topWeekdayYear]}`);
-  safeSetText("kpiTopWeekdayYearHint", `${weekdayTotalsYear[topWeekdayYear].toFixed(1)}h acumuladas`);
+  safeSetText("kpiTopWeekdayYear", DAYS[topWeekdayYear]);
+  safeSetText(
+    "kpiTopWeekdayYearHint",
+    `${fmtHours(weekdayTotalsYear[topWeekdayYear])} acumuladas`
+  );
 
-  safeSetText("kpiLunchHoursYear", `${lunchHoursYear.toFixed(1)}h`);
-  safeSetText("kpiLunchHoursYearHint", "Horas descontadas por la regla (>6h) en el año");
+  safeSetText("kpiLunchHoursYear", fmtHours(lunchHoursYear));
+  safeSetText(
+    "kpiLunchHoursYearHint",
+    "Total descontado por la regla de almuerzo (>6h)"
+  );
 
-  safeSetText("kpiDaysWithJornadaYear", `${daysWithJornadaYear}`);
-  safeSetText("kpiDaysWithJornadaYearHint", "Días con horario asignado en el año");
+  safeSetText("kpiDaysWithJornadaYear", String(daysWithJornadaYear));
+  safeSetText(
+    "kpiDaysWithJornadaYearHint",
+    "Días con horario asignado en el año"
+  );
 
-  safeSetText("kpiDaysWithoutJornadaYear", `${daysWithoutJornadaYear}`);
-  safeSetText("kpiDaysWithoutJornadaYearHint", "Días sin jornada (incluye días sin registro)");
+  safeSetText("kpiDaysWithoutJornadaYear", String(daysWithoutJornadaYear));
+  safeSetText(
+    "kpiDaysWithoutJornadaYearHint",
+    "Días sin jornada (incluye días sin registro)"
+  );
 
-  safeSetText("kpiYearRawTotal", `${rawYearTotal.toFixed(1)}h`);
-  safeSetText("kpiYearRawTotalHint", "Informativo: horas del año sin descuento de almuerzo");
+  safeSetText("kpiYearRawTotal", fmtHours(rawYearTotal));
+  safeSetText("kpiYearRawTotalHint", "Informativo: horas del año sin descuento");
 }
 
 /**********************************************************
- * Lista “Días donde aplicó almuerzo”
+ * LUNCH DAYS LIST
  **********************************************************/
-function renderLunchDaysList(lunchDays){
+function renderLunchDaysList(lunchDays) {
   const list = byId("lunchDaysList");
-  if(!list) return;
+  if (!list) return;
 
   list.innerHTML = "";
 
-  if(!lunchDays.length){
+  if (!lunchDays.length) {
     const empty = document.createElement("div");
     empty.className = "sub";
-    empty.textContent = "Este mes no hay días que requieran almuerzo según la regla (> 6h).";
+    empty.textContent =
+      "Este mes no hay días que requieran almuerzo según la regla (> 6h).";
     list.appendChild(empty);
     return;
   }
 
-  const sorted = [...lunchDays].sort((a,b)=>a.date - b.date);
+  const sorted = [...lunchDays].sort((a, b) => a.date - b.date);
+  const frag = document.createDocumentFragment();
 
-  sorted.forEach(d=>{
+  for (const d of sorted) {
     const chip = document.createElement("div");
     chip.className = "chip chip--on";
-    chip.style.display = "inline-flex";
-    chip.style.margin = "4px 6px 0 0";
-    chip.style.gap = "8px";
-    chip.style.alignItems = "center";
+    chip.textContent = `${DAYS[d.weekday]} ${fmtDM(d.date)} · ${fmtHours(d.hours)} (−${fmtHours(d.lunchHours)} 🍽️)`;
+    chip.title = `${fmtDMY(d.date)} · ${d.label} · ${fmtHours(d.hours)} efectivas`;
+    frag.appendChild(chip);
+  }
 
-    chip.textContent = `${CFG.DAYS[d.weekday]} ${fmtDM(d.date)} · ${d.hours.toFixed(1)}h (−${d.lunchHours}h 🍽️)`;
-
-    list.appendChild(chip);
-  });
+  list.appendChild(frag);
 }
 
 /**********************************************************
- * NAV (Mes y Semana)
+ * NAVEGACIÓN
  **********************************************************/
-function wireNav(){
+function setMonthAndBestWeek(month) {
+  currentMonth = clamp(month, 0, 11);
+  monthWeeks = getWeeksForMonth(YEAR, currentMonth);
+
+  const now = new Date();
+  if (now.getFullYear() === YEAR && now.getMonth() === currentMonth) {
+    const idx = findWeekIndexForDate(monthWeeks, now);
+    currentWeekIndex = idx >= 0 ? idx : 0;
+  } else {
+    currentWeekIndex = 0;
+  }
+
+  render();
+}
+
+function wireNav() {
   const prevMonth = byId("prevMonth");
   const nextMonth = byId("nextMonth");
   const prevWeek = byId("prevWeek");
   const nextWeek = byId("nextWeek");
 
-  if(prevMonth) prevMonth.addEventListener("click", ()=>{
-    currentMonth = (currentMonth + 11) % 12;
-    currentWeekIndex = 0;
-    render();
-  });
+  if (prevMonth) {
+    prevMonth.addEventListener("click", () => {
+      setMonthAndBestWeek((currentMonth + 11) % 12);
+    });
+  }
 
-  if(nextMonth) nextMonth.addEventListener("click", ()=>{
-    currentMonth = (currentMonth + 1) % 12;
-    currentWeekIndex = 0;
-    render();
-  });
+  if (nextMonth) {
+    nextMonth.addEventListener("click", () => {
+      setMonthAndBestWeek((currentMonth + 1) % 12);
+    });
+  }
 
-  if(prevWeek) prevWeek.addEventListener("click", ()=>{
-    currentWeekIndex = Math.max(currentWeekIndex - 1, 0);
-    render();
-  });
+  if (prevWeek) {
+    prevWeek.addEventListener("click", () => {
+      currentWeekIndex = Math.max(currentWeekIndex - 1, 0);
+      render();
+    });
+  }
 
-  if(nextWeek) nextWeek.addEventListener("click", ()=>{
-    currentWeekIndex = Math.min(currentWeekIndex + 1, monthWeeks.length - 1);
-    render();
-  });
+  if (nextWeek) {
+    nextWeek.addEventListener("click", () => {
+      currentWeekIndex = Math.min(currentWeekIndex + 1, monthWeeks.length - 1);
+      render();
+    });
+  }
+
+  window.addEventListener(
+    "resize",
+    debounce(() => {
+      renderCalendar();
+    }, 120)
+  );
 }
 
 /**********************************************************
- * RESIZE (re-render solo si cambia modo)
+ * REFRESCO AUTOMÁTICO
  **********************************************************/
-function rafThrottle(fn){
-  let ticking = false;
-  return function(...args){
-    if(ticking) return;
-    ticking = true;
-    requestAnimationFrame(()=>{
-      ticking = false;
-      fn.apply(this, args);
-    });
-  };
+async function refreshDataIfNeeded(force = false) {
+  const now = Date.now();
+  if (!force && now - lastLoadAt < FOCUS_REFRESH_GAP_MS) return;
+
+  try {
+    await load({ silent: true });
+  } catch (error) {
+    console.error("Error refrescando datos:", error);
+  }
 }
 
-const onResize = rafThrottle(()=>{
-  const mode = getLayoutMode();
-  if(mode !== lastLayoutMode){
-    // Si estábamos en modo lista, el calendarGrid quedó en 1 columna.
-    // Al volver a grid, el renderGrid reconstruye completo.
-    render();
-  }
-});
+function wireAutoRefresh() {
+  window.addEventListener("focus", () => {
+    refreshDataIfNeeded(false);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      refreshDataIfNeeded(false);
+    }
+  });
+
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) {
+      refreshDataIfNeeded(true);
+    }
+  });
+
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => {
+    if (!document.hidden) {
+      refreshDataIfNeeded(true);
+    }
+  }, AUTO_REFRESH_MS);
+}
+
+/**********************************************************
+ * UTILS PEQUEÑOS
+ **********************************************************/
+function debounce(fn, wait = 100) {
+  let t = null;
+  return function (...args) {
+    clearTimeout(t);
+    t = setTimeout(() => fn.apply(this, args), wait);
+  };
+}
 
 /**********************************************************
  * START
  **********************************************************/
-async function start(){
+async function start() {
   wireNav();
-  window.addEventListener("resize", onResize, { passive: true });
+  wireAutoRefresh();
 
-  initMonth();
-
-  // Intentamos red primero, si falla caemos al cache.
-  try{
-    const tsv = await fetchTSV();
-    buildFromTSV(tsv);
-    render();
-  }catch(err){
-    console.error("[Planner] fetchTSV failed:", err);
-
-    const cached = cacheRead();
-    if(cached){
-      buildFromTSV(cached);
-      render();
-      // Aviso suave (sin drama)
-      // Si no quieres alert, bórralo.
-      setTimeout(()=>{
-        console.warn("[Planner] usando datos en cache por falla de red.");
-      }, 0);
-    } else {
-      alert("Error cargando datos. Revisa la URL TSV, permisos del Sheet o tu conexión.");
-    }
+  try {
+    await load();
+  } catch (err) {
+    console.error(err);
+    showFatalError(
+      "Error cargando datos. Revisen la URL TSV o los permisos del Sheet."
+    );
   }
 }
 
