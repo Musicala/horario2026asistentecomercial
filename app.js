@@ -6,6 +6,7 @@
  * - Semana visible suma días aunque cruce mes
  * - Refresco robusto del Sheet
  * - Mejor estabilidad general
+ * - Calendario móvil con horario completo en dos líneas
  **********************************************************/
 
 /**********************************************************
@@ -366,7 +367,7 @@ async function load({ silent = false } = {}) {
       const hours = hasJornada ? effectiveHours(rawHours) : 0;
 
       const timeLabel = hasJornada
-        ? `${minToHHMM(startMin)} – ${minToHHMM(endMin)}`
+        ? `${minToHHMM(startMin)} - ${minToHHMM(endMin)}`
         : "";
 
       parsed.push({
@@ -504,7 +505,18 @@ function getYearWeekdayTotals() {
 /**********************************************************
  * UI HELPERS
  **********************************************************/
-function getCompactCellText(dayRecord) {
+function getMobileCellText(dayRecord) {
+  if (!dayRecord) return "Sin jornada";
+
+  if (!dayRecord.hasJornada) {
+    return dayRecord.label || "Sin jornada";
+  }
+
+  const lunchMark = dayRecord.lunchHours ? "\n🍽️" : "";
+  return `${fmtHours(dayRecord.hours)}\n${minToHHMM(dayRecord.startMin)} - ${minToHHMM(dayRecord.endMin)}${lunchMark}`;
+}
+
+function getDesktopCellText(dayRecord) {
   if (!dayRecord) return "Sin jornada";
 
   if (!dayRecord.hasJornada) {
@@ -512,12 +524,15 @@ function getCompactCellText(dayRecord) {
   }
 
   const lunchMark = dayRecord.lunchHours ? " 🍽️" : "";
+  return `${fmtHours(dayRecord.hours)} · ${dayRecord.label}${lunchMark}`;
+}
 
+function getCompactCellText(dayRecord) {
   if (isMobileLayout()) {
-    return `${fmtHours(dayRecord.hours)} · ${minToHHMM(dayRecord.startMin)}-${minToHHMM(dayRecord.endMin)}${lunchMark}`;
+    return getMobileCellText(dayRecord);
   }
 
-  return `${fmtHours(dayRecord.hours)} · ${dayRecord.label}${lunchMark}`;
+  return getDesktopCellText(dayRecord);
 }
 
 function getCellTitle(dayRecord) {
@@ -626,6 +641,10 @@ function renderCalendar() {
     const bottom = document.createElement("div");
     bottom.className = "calHours";
     bottom.textContent = getCompactCellText(data);
+
+    if (isMobileLayout()) {
+      bottom.style.whiteSpace = "pre-line";
+    }
 
     if (data && data.hasJornada) {
       cell.classList.add("on");

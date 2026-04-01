@@ -65,7 +65,7 @@ body{
   padding: 0;
   min-height: 100%;
   max-width: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 body{
@@ -85,6 +85,8 @@ body{
     sans-serif;
   line-height: 1.4;
   text-rendering: optimizeLegibility;
+  overflow-y: auto;
+  overscroll-behavior-y: auto;
 }
 
 img,
@@ -162,6 +164,7 @@ code{
 ========================= */
 .appShell{
   min-height: 100vh;
+  min-height: 100svh;
   width: 100%;
 }
 
@@ -535,7 +538,7 @@ code{
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
-  touch-action: pan-x;
+  touch-action: auto;
   padding-bottom: 2px;
 }
 
@@ -645,6 +648,7 @@ code{
   line-height: 1.2;
   overflow-wrap: anywhere;
   word-break: break-word;
+  white-space: normal;
 }
 
 .calCell.off .calHours{
@@ -926,11 +930,12 @@ code{
 
   html,
   body{
-    overflow-x: hidden;
+    overflow-x: clip;
   }
 
   body{
-    overscroll-behavior-y: contain;
+    overflow-y: auto;
+    overscroll-behavior-y: auto;
   }
 
   .wrap{
@@ -985,31 +990,55 @@ code{
     top: 0;
     z-index: 30;
     padding-top: 4px;
-    padding-bottom: 6px;
-    margin-bottom: 10px;
+    padding-bottom: 4px;
+    margin-bottom: 8px;
+    gap: 6px;
     background:
       linear-gradient(
         to bottom,
         rgba(243,246,251,.98),
-        rgba(243,246,251,.90)
+        rgba(243,246,251,.94)
       );
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(8px);
   }
 
   .tabsScroller{
+    padding-bottom: 0;
     scroll-snap-type: x proximity;
   }
 
+  .tabsRow{
+    gap: 6px;
+    align-items: flex-start;
+  }
+
   .tabsLeft{
-    padding-bottom: 2px;
+    width: 100%;
+    min-width: 0;
+    padding-bottom: 0;
   }
 
   .tabBtn{
     scroll-snap-align: start;
   }
 
+  .legendNote{
+    width: 100%;
+    min-width: 0;
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    align-items: flex-start;
+    gap: 4px;
+    margin-top: 0;
+    padding-top: 0;
+  }
+
   .legendHelp{
+    margin: 0;
     font-size: .76rem;
+    line-height: 1.28;
+    max-width: none;
+    text-align: left;
     opacity: .95;
   }
 
@@ -1045,18 +1074,23 @@ code{
   }
 
   .calCell{
+    min-height: 92px;
     justify-content: flex-start;
+    padding: 8px 7px 8px;
+    gap: 4px;
   }
 
   .calDate{
-    margin-bottom: 2px;
+    margin-bottom: 0;
+    font-size: .9rem;
   }
 
   .calHours{
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+    font-size: .72rem;
+    line-height: 1.18;
+    white-space: pre-line;
+    overflow: visible;
+    display: block;
   }
 
   .weekChartScroller{
@@ -1145,6 +1179,24 @@ code{
     gap: 6px;
   }
 
+  .plannerToolbar{
+    margin-bottom: 6px;
+    padding-bottom: 2px;
+  }
+
+  .tabsRow{
+    gap: 4px;
+  }
+
+  .legendNote{
+    gap: 2px;
+  }
+
+  .legendHelp{
+    font-size: .73rem;
+    line-height: 1.24;
+  }
+
   .card{
     padding: 11px 10px 12px;
   }
@@ -1155,10 +1207,6 @@ code{
 
   .sub{
     font-size: .79rem;
-  }
-
-  .legendHelp{
-    font-size: .74rem;
   }
 
   .chip{
@@ -1173,8 +1221,8 @@ code{
   }
 
   .calCell{
-    min-height: 70px;
-    padding: 7px 6px 6px;
+    min-height: 96px;
+    padding: 8px 6px 8px;
     border-radius: 12px;
   }
 
@@ -1183,12 +1231,11 @@ code{
   }
 
   .calHours{
-    font-size: .68rem;
-    line-height: 1.12;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    -webkit-line-clamp: 3;
+    font-size: .72rem;
+    line-height: 1.18;
+    white-space: pre-line;
+    overflow: visible;
+    display: block;
   }
 
   .weekChart{
@@ -1269,16 +1316,16 @@ code{
   }
 
   .calCell{
-    min-height: 66px;
+    min-height: 94px;
+    padding: 8px 6px;
   }
 
   .calHours{
-    font-size: .65rem;
-    line-height: 1.08;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    -webkit-line-clamp: 2;
+    font-size: .7rem;
+    line-height: 1.18;
+    white-space: pre-line;
+    overflow: visible;
+    display: block;
   }
 
   .weekChart{
